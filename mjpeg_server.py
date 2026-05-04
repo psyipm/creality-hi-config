@@ -25,8 +25,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 H264_SOCKET    = '/var/run/h264_uds'
 PORT           = 8081
-FFMPEG_FPS     = '15'
-FFMPEG_QUALITY = '5'   # 1=best, 31=worst
+FFMPEG_QUALITY = '3'   # 1=best, 31=worst
 RECONNECT_DELAY = 2.0  # seconds between reconnect attempts on socket failure
 LOG_FILE       = '/mnt/UDISK/printer_data/logs/mjpeg_server.log'
 
@@ -61,10 +60,15 @@ class FrameProvider:
         return s
 
     def _spawn_ffmpeg(self):
+        # Low-latency decode flags: skip probing/buffering since we know it's
+        # H264 from a live source. No fps re-rate — output matches input fps.
         return subprocess.Popen(
             ['ffmpeg', '-loglevel', 'error',
+             '-fflags', 'nobuffer',
+             '-flags', 'low_delay',
+             '-probesize', '32',
+             '-analyzeduration', '0',
              '-f', 'h264', '-i', 'pipe:0',
-             '-vf', f'fps={FFMPEG_FPS}',
              '-f', 'image2pipe', '-vcodec', 'mjpeg',
              '-q:v', FFMPEG_QUALITY, 'pipe:1'],
             stdin=subprocess.PIPE,

@@ -58,6 +58,12 @@ deploy_if_changed \
 restart_moonraker="${RESTART}"
 
 deploy_if_changed \
+    "${REPO_DIR}/webcam.py" \
+    "/usr/share/moonraker/components/webcam.py" \
+    "webcam.py"
+[[ "${RESTART}" == "1" ]] && restart_moonraker=1
+
+deploy_if_changed \
     "${REPO_DIR}/mjpeg_server.py" \
     "/mnt/UDISK/mjpeg_server.py" \
     "mjpeg_server.py"

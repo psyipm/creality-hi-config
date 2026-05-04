@@ -87,6 +87,18 @@ The webcam appears in Settings → Cameras automatically. To put it on the
 dashboard view: edit (pencil) icon → **Add** → **Camera** → select `camera`.
 Layout is stored in browser localStorage, so each browser/profile needs this once.
 
+### Webcam component patch
+This older Moonraker `WebCam` class predates the `enabled` field. Fluidd 1.30
+filters cameras by `enabled === true`, so config-managed cameras get hidden
+from the dashboard widget. `webcam.py` in this repo is a copy of the printer's
+component with one tweak in `WebCam.as_dict()`:
+
+```python
+d.setdefault("enabled", True)
+```
+
+Deployed alongside `spoolman.py` to `/usr/share/moonraker/components/`.
+
 ---
 
 ## 2. Spoolman Integration
@@ -195,6 +207,7 @@ is on UDISK. The init script `/etc/init.d/mjpeg_server` is on the overlay.
 | `spoolman.py` | Modified upstream Moonraker spoolman component; deployed to `/usr/share/moonraker/components/` |
 | `mjpeg_server.py` | MJPEG bridge for the Creality H264 socket; deployed to `/mnt/UDISK/` |
 | `mjpeg_server.init` | procd init script for the MJPEG bridge; deployed to `/etc/init.d/mjpeg_server` |
+| `webcam.py` | Modified Moonraker webcam component with `enabled: True` injected for Fluidd 1.30 compatibility; deployed to `/usr/share/moonraker/components/` |
 | `deploy.sh` | Uploads changed files to the printer and restarts affected services. Accepts the printer IP as the first arg (default `192.168.68.37`) |
 | `printer.cfg` | Reference copy of the live Klipper config from the printer (includes Klipper's autosaved bed mesh + probe data; never deployed back) |
 | `CHANGES.md` | This file |
