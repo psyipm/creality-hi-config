@@ -30,7 +30,7 @@ Z-offset, PID values).
 | `spoolman.py` | Modified upstream Moonraker spoolman component (back-ported to the older Creality-patched API) |
 | `webcam.py` | Modified Moonraker webcam component (`enabled: True` for Fluidd 1.30) |
 | `deploy.sh` | Idempotent uploader — md5-compares, copies what changed, restarts affected services |
-| `.env.example` | Template for `.env` — printer IP, Spoolman URL, Obico URL |
+| `.env.example` | Template for `.env` — printer IP, Spoolman URL, Obico URL, Obico auth token |
 | `CHANGES.md` | The detailed write-up — architecture, trade-offs, expected warnings, one-time bootstraps |
 
 ## Quick start
@@ -43,13 +43,16 @@ cp .env.example .env         # one-time, edit values
 ./deploy.sh 192.168.1.50     # CLI arg overrides PRINTER_IP
 ```
 
-`.env` (gitignored) holds `PRINTER_IP`, `SPOOLMAN_URL`, and `OBICO_URL`.
-`deploy.sh` substitutes `__PRINTER_HOST__` and `__SPOOLMAN_URL__` in
-`moonraker.conf` at upload time, so the same config works against any printer.
+`.env` (gitignored) holds `PRINTER_IP`, `SPOOLMAN_URL`, `OBICO_URL`, and
+`OBICO_AUTH_TOKEN`. `deploy.sh` substitutes the corresponding placeholders in
+`moonraker.conf` and `moonraker-obico.cfg.template` at upload time, so the
+same configs work against any printer.
 
-The Obico bridge needs a one-time bootstrap (download source, install Python
-deps to `/mnt/UDISK`, link to your Obico server) — see **CHANGES.md §3**
-before the first `deploy.sh` run.
+The Obico agent itself (Python source + deps, ~20 MB) isn't tracked here —
+it's downloaded onto the printer once during the bootstrap. The flow is:
+install agent on printer → `./deploy.sh` (creates the cfg) → run the
+interactive `link` step → paste the resulting `auth_token` into `.env`. Full
+walkthrough in **CHANGES.md §3**.
 
 ## Read this before adopting anything
 
