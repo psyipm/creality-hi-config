@@ -215,5 +215,13 @@ is on UDISK. The init script `/etc/init.d/mjpeg_server` is on the overlay.
 | `webcam.py` | Modified Moonraker webcam component with `enabled: True` injected for Fluidd 1.30 compatibility; deployed to `/usr/share/moonraker/components/` |
 | `moonraker.conf` | Full Moonraker config including our `[webcam]` and `[spoolman]` sections; deployed to `/usr/share/moonraker/`. Webcam URLs use `__PRINTER_HOST__` placeholder — substituted by `deploy.sh` at upload |
 | `deploy.sh` | Uploads changed files to the printer and restarts affected services. Accepts the printer IP as the first arg (default `192.168.68.37`); also substitutes `__PRINTER_HOST__` in `moonraker.conf` |
-| `printer.cfg` | Reference copy of the live Klipper config from the printer (includes Klipper's autosaved bed mesh + probe data; never deployed back) |
 | `CHANGES.md` | This file |
+
+The repo only tracks files we own and deploy. `printer.cfg` is intentionally
+not tracked because Klipper auto-modifies it (saved bed mesh, probe Z-offset,
+PID values, etc.) — the printer is the source of truth there. To inspect or
+back up the current config:
+
+```sh
+scp root@192.168.68.37:/mnt/UDISK/printer_data/config/printer.cfg .
+```
