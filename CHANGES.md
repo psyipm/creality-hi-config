@@ -69,14 +69,18 @@ procd init script (`START=99`, respawn enabled). Just launches the MJPEG bridge
 /etc/init.d/mjpeg_server {start,stop,restart}
 ```
 
-**Modified: `/usr/share/moonraker/moonraker.conf`**
+**`moonraker.conf`** → `/usr/share/moonraker/moonraker.conf`
+The full Moonraker config lives in this repo (`moonraker.conf`). Webcam URLs
+use the placeholder `__PRINTER_HOST__`, which `deploy.sh` substitutes with
+the printer IP at upload time. The relevant section:
+
 ```ini
 [webcam camera]
 location: printer
 service: mjpegstreamer
 target_fps: 15
-stream_url: http://192.168.68.37:8081/?action=stream
-snapshot_url: http://192.168.68.37:8081/?action=snapshot
+stream_url: http://__PRINTER_HOST__:8081/?action=stream
+snapshot_url: http://__PRINTER_HOST__:8081/?action=snapshot
 flip_horizontal: False
 flip_vertical: False
 rotation: 0
@@ -148,7 +152,8 @@ affected services:
 ```
 
 ### Moonraker config
-**Modified: `/usr/share/moonraker/moonraker.conf`**
+The `[spoolman]` section is in `moonraker.conf` in this repo:
+
 ```ini
 [spoolman]
 server: http://spoolman.home
@@ -208,6 +213,7 @@ is on UDISK. The init script `/etc/init.d/mjpeg_server` is on the overlay.
 | `mjpeg_server.py` | MJPEG bridge for the Creality H264 socket; deployed to `/mnt/UDISK/` |
 | `mjpeg_server.init` | procd init script for the MJPEG bridge; deployed to `/etc/init.d/mjpeg_server` |
 | `webcam.py` | Modified Moonraker webcam component with `enabled: True` injected for Fluidd 1.30 compatibility; deployed to `/usr/share/moonraker/components/` |
-| `deploy.sh` | Uploads changed files to the printer and restarts affected services. Accepts the printer IP as the first arg (default `192.168.68.37`) |
+| `moonraker.conf` | Full Moonraker config including our `[webcam]` and `[spoolman]` sections; deployed to `/usr/share/moonraker/`. Webcam URLs use `__PRINTER_HOST__` placeholder — substituted by `deploy.sh` at upload |
+| `deploy.sh` | Uploads changed files to the printer and restarts affected services. Accepts the printer IP as the first arg (default `192.168.68.37`); also substitutes `__PRINTER_HOST__` in `moonraker.conf` |
 | `printer.cfg` | Reference copy of the live Klipper config from the printer (includes Klipper's autosaved bed mesh + probe data; never deployed back) |
 | `CHANGES.md` | This file |

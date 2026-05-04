@@ -29,6 +29,16 @@ remote_md5() {
     ssh "${SSH_TARGET}" "md5sum '$1' 2>/dev/null | awk '{print \$1}'"
 }
 
+# Render a repo file: substitute __PRINTER_HOST__ with the target IP and write
+# the result to a tmp file. Echoes the tmp file path so callers can chain it.
+render() {
+    local src="$1"
+    local tmp
+    tmp="$(mktemp)"
+    sed "s/__PRINTER_HOST__/${PRINTER_IP}/g" "${src}" > "${tmp}"
+    echo "${tmp}"
+}
+
 # Upload local file if it differs from the remote copy. Sets RESTART=1 on change.
 deploy_if_changed() {
     local local_path="$1"
@@ -61,6 +71,16 @@ deploy_if_changed \
     "${REPO_DIR}/webcam.py" \
     "/usr/share/moonraker/components/webcam.py" \
     "webcam.py"
+[[ "${RESTART}" == "1" ]] && restart_moonraker=1
+
+# moonraker.conf has __PRINTER_HOST__ placeholder for webcam URLs; render
+# with the target IP before comparing/uploading.
+moonraker_conf_rendered="$(render "${REPO_DIR}/moonraker.conf")"
+deploy_if_changed \
+    "${moonraker_conf_rendered}" \
+    "/usr/share/moonraker/moonraker.conf" \
+    "moonraker.conf"
+rm -f "${moonraker_conf_rendered}"
 [[ "${RESTART}" == "1" ]] && restart_moonraker=1
 
 deploy_if_changed \
