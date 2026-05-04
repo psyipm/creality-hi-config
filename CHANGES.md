@@ -133,13 +133,19 @@ printer — no patch scripts required.
 argument, so `_handle_status_update()` would never be called during a print.
 The `except TypeError` fallback instead launches `_poll_extruder_position()`,
 an asyncio task that polls `query_objects()` at `sync_rate_seconds` intervals
-and feeds results directly into `_handle_status_update()`. Any stale task is
-cancelled on Klippy reconnect to prevent accumulation.
+and calls `_handle_status_update(result, eventtime)` directly (synchronous,
+two positional args — same signature the upstream subscribe callback would use).
+Any stale task is cancelled on Klippy reconnect to prevent accumulation.
+
+Verified working: spool weight decrements and "Last used" timestamp updates in
+the Spoolman web UI during an actual print.
 
 ### Deployment
+Use `deploy.sh` from the repo root — uploads any changed file and restarts the
+affected services:
 ```sh
-scp spoolman.py root@192.168.68.37:/usr/share/moonraker/components/spoolman.py
-/etc/init.d/moonraker restart
+./deploy.sh                 # uses default IP 192.168.68.37
+./deploy.sh 10.0.0.42       # custom IP
 ```
 
 ### Moonraker config
@@ -201,5 +207,6 @@ is on UDISK. The init script `/etc/init.d/mjpeg_server` is on the overlay.
 |---|---|
 | `spoolman.py` | Modified upstream Moonraker spoolman component; deployed to `/usr/share/moonraker/components/` |
 | `mjpeg_server.py` | MJPEG streaming server for both cameras; deployed to `/mnt/UDISK/` |
-| `printer.cfg` | Klipper printer configuration (unmodified factory copy) |
+| `deploy.sh` | Uploads changed files to the printer and restarts affected services. Accepts the printer IP as the first arg (default `192.168.68.37`) |
+| `printer.cfg` | Reference copy of the live Klipper config from the printer (includes Klipper's autosaved bed mesh + probe data; never deployed back) |
 | `CHANGES.md` | This file |
