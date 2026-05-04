@@ -5,8 +5,8 @@
 #   ./deploy.sh [printer_ip]
 #
 # Configuration:
-#   Reads PRINTER_IP and SPOOLMAN_URL from .env in the repo root (see
-#   .env.example). A CLI arg overrides PRINTER_IP.
+#   Reads PRINTER_IP, SPOOLMAN_URL, OBICO_URL, OBICO_AUTH_TOKEN from .env in
+#   the repo root (see .env.example). A CLI arg overrides PRINTER_IP.
 #
 # Uploads only files whose content differs from the printer's copy, then
 # restarts the affected services. Requires SSH key auth as root.
@@ -26,6 +26,8 @@ fi
 
 PRINTER_IP="${1:-${PRINTER_IP:-}}"
 SPOOLMAN_URL="${SPOOLMAN_URL:-}"
+OBICO_URL="${OBICO_URL:-}"
+OBICO_AUTH_TOKEN="${OBICO_AUTH_TOKEN:-}"
 
 if [[ -z "${PRINTER_IP}" ]]; then
     echo "error: PRINTER_IP not set. Pass as arg or define in .env (see .env.example)." >&2
@@ -35,6 +37,11 @@ if [[ -z "${SPOOLMAN_URL}" ]]; then
     echo "error: SPOOLMAN_URL not set in .env (see .env.example)." >&2
     exit 1
 fi
+if [[ -z "${OBICO_URL}" ]]; then
+    echo "error: OBICO_URL not set in .env (see .env.example)." >&2
+    exit 1
+fi
+# OBICO_AUTH_TOKEN is allowed to be empty on first deploy — see safety check below.
 
 SSH_TARGET="root@${PRINTER_IP}"
 
@@ -56,16 +63,20 @@ remote_md5() {
 # file. Echoes the tmp file path so callers can chain it.
 #
 # Substitutions:
-#   __PRINTER_HOST__  → $PRINTER_IP
-#   __SPOOLMAN_URL__  → $SPOOLMAN_URL
+#   __PRINTER_HOST__      → $PRINTER_IP
+#   __SPOOLMAN_URL__      → $SPOOLMAN_URL
+#   __OBICO_URL__         → $OBICO_URL
+#   __OBICO_AUTH_TOKEN__  → $OBICO_AUTH_TOKEN (may be empty)
 #
-# Uses `|` as the sed delimiter because $SPOOLMAN_URL contains slashes.
+# Uses `|` as the sed delimiter because URL values contain slashes.
 render() {
     local src="$1"
     local tmp
     tmp="$(mktemp)"
     sed -e "s|__PRINTER_HOST__|${PRINTER_IP}|g" \
         -e "s|__SPOOLMAN_URL__|${SPOOLMAN_URL}|g" \
+        -e "s|__OBICO_URL__|${OBICO_URL}|g" \
+        -e "s|__OBICO_AUTH_TOKEN__|${OBICO_AUTH_TOKEN}|g" \
         "${src}" > "${tmp}"
     echo "${tmp}"
 }
@@ -136,6 +147,32 @@ deploy_if_changed \
 restart_obico="${RESTART}"
 if [[ "${RESTART}" == "1" ]]; then
     ssh "${SSH_TARGET}" "chmod +x /etc/init.d/moonraker-obico && /etc/init.d/moonraker-obico enable"
+fi
+
+# moonraker-obico.cfg: render from template, then guard against clobbering a
+# remote auth_token with an empty local one. The token is written by the
+# interactive `link` step on the printer (see CHANGES.md §3); on the first
+# deploy OBICO_AUTH_TOKEN is empty, which is fine because the remote cfg
+# doesn't exist yet. After linking, the user must paste the token from the
+# printer's cfg into .env to keep future deploys idempotent.
+obico_cfg_remote="/mnt/UDISK/printer_data/config/moonraker-obico.cfg"
+obico_cfg_skip=0
+if [[ -z "${OBICO_AUTH_TOKEN}" ]]; then
+    remote_token_line="$(ssh "${SSH_TARGET}" "grep -E '^auth_token[[:space:]]*=[[:space:]]*[^[:space:]]' '${obico_cfg_remote}' 2>/dev/null" || true)"
+    if [[ -n "${remote_token_line}" ]]; then
+        echo "  moonraker-obico.cfg: SKIPPED — remote has auth_token but OBICO_AUTH_TOKEN is empty in .env"
+        echo "    Paste the token from the printer's cfg into .env, then re-run deploy."
+        obico_cfg_skip=1
+    fi
+fi
+if [[ "${obico_cfg_skip}" == "0" ]]; then
+    obico_cfg_rendered="$(render "${REPO_DIR}/moonraker-obico.cfg.template")"
+    deploy_if_changed \
+        "${obico_cfg_rendered}" \
+        "${obico_cfg_remote}" \
+        "moonraker-obico.cfg"
+    rm -f "${obico_cfg_rendered}"
+    [[ "${RESTART}" == "1" ]] && restart_obico=1
 fi
 
 if [[ "${restart_moonraker}" == "1" ]]; then

@@ -1,0 +1,22 @@
+[server]
+url = __OBICO_URL__
+auth_token = __OBICO_AUTH_TOKEN__
+
+[moonraker]
+host = 127.0.0.1
+port = 7125
+
+[webcam]
+disable_video_streaming = False
+snapshot_url = http://127.0.0.1:8081/?action=snapshot
+stream_url = http://127.0.0.1:8081/?action=stream
+target_fps = 15
+
+[logging]
+path = /mnt/UDISK/printer_data/logs/moonraker-obico.log
+level = INFO
+
+[tunnel]
+dest_host = 127.0.0.1
+dest_port = 80
+dest_is_ssl = False

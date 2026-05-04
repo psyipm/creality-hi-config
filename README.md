@@ -25,6 +25,7 @@ Z-offset, PID values).
 | `mjpeg_server.py` | H.264 → MJPEG bridge over Creality's `/var/run/h264_uds` socket |
 | `mjpeg_server.init` | procd init script for the MJPEG bridge |
 | `moonraker-obico.init` | procd init script for the self-hosted Obico bridge |
+| `moonraker-obico.cfg.template` | Templated Obico agent cfg — `OBICO_URL` and `OBICO_AUTH_TOKEN` substituted from `.env` at deploy time |
 | `moonraker.conf` | Full Moonraker config including `[webcam]` and `[spoolman]` |
 | `spoolman.py` | Modified upstream Moonraker spoolman component (back-ported to the older Creality-patched API) |
 | `webcam.py` | Modified Moonraker webcam component (`enabled: True` for Fluidd 1.30) |
