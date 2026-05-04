@@ -6,79 +6,73 @@ Stack: Klipper + Moonraker (Creality-patched, older build) + Fluidd 1.30.0
 
 ---
 
-## 1. Camera Streaming (MJPEG)
+## 1. Camera Streaming (MJPEG bridge)
 
 ### Problem
-The printer uses a proprietary `webrtc_local` binary serving WebRTC on port 8000.
-Fluidd has no native support for Creality's custom WebRTC signaling format.
-Both cameras (`/dev/video0` nozzle, `/dev/video2` USB) were exclusively locked by
-`cam_app` processes; ffmpeg could not open them concurrently.
+Creality serves WebRTC on port 8000 using a custom signaling protocol. Fluidd,
+Obico, and Home Assistant all need plain MJPEG. Trying to drive each camera
+node (`/dev/video0`, `/dev/video2`) directly fails — `cam_app` holds the V4L2
+lock on whichever node is active.
 
-### Architecture discovered
+### Architecture
 ```
-cam_app -i /dev/video0  →  listens on /var/run/h264_uds (Unix socket, H264)
-cam_app -i /dev/video2  →  locks /dev/video2, no accessible socket path
-         ↓                         ↓
-webrtc_local (PID 3347) ←  connects to /var/run/h264_uds during active print
-webrtc_local (PID 2309) ←  (USB cam pair, orphaned socket - no path binding)
-         ↓
-   port 8000 (WebRTC, HTML page, round-robin between both instances)
+cam_app -i video0|video2  ──>  /var/run/h264_uds  (H264, multi-client Unix socket)
+                                     │
+                ┌────────────────────┼─────────────────────┐
+                v                    v                     v
+       webrtc_local (port 8000)   our mjpeg_server   (other consumers)
+       custom WebRTC HTML        H264 → ffmpeg → MJPEG
 ```
 
-Key findings:
-- `cam_app` (nozzle) accepts **multiple simultaneous clients** on `/var/run/h264_uds`
-- The nozzle cam socket is accessible 24/7; webrtc_local only connects during prints
-- The USB cam socket (inode 4189) loses its filesystem path because the nozzle cam_app
-  starts second and rebinds `/var/run/h264_uds`, making the USB socket unreachable by path
-- `ffmpeg` is available on the system
+Whichever camera `cam_app` currently feeds is what `/var/run/h264_uds` carries.
+With only the nozzle cam present, that's the nozzle. When a USB cam is plugged
+in, Creality spawns a second `cam_app` for `/dev/video2`, which **rebinds**
+`/var/run/h264_uds` to the USB stream — so port 8000 and our 8081 both
+automatically follow.
 
 ### Solution
-- **Nozzle cam (port 8081)**: Python MJPEG server connects to `/var/run/h264_uds`,
-  pipes H264 → ffmpeg → multipart MJPEG over HTTP. Non-destructive — `cam_app` keeps
-  running, timelapse and AI monitoring for the nozzle cam are unaffected.
-- **USB cam (port 8082)**: `cam_app` for `/dev/video2` is killed at startup (it has
-  no webrtc client connected and its H264 socket is unreachable anyway), freeing
-  `/dev/video2` for ffmpeg to capture directly as MJPEG.
+A single Python MJPEG server (`mjpeg_server.py`) on port 8081:
 
-### Files created/modified on printer
+- Connects to `/var/run/h264_uds` per request, pipes H264 → `ffmpeg` → multipart
+  MJPEG (or single JPEG for snapshots).
+- Serves whatever cam_app currently feeds — no fights over V4L2 locks, no
+  process killing.
+- Native WebRTC on port 8000 keeps working independently for the Creality app.
 
-**New file: `/mnt/UDISK/mjpeg_server.py`**
-Python MJPEG HTTP server. Serves both cameras:
-- `:8081/?action=stream` — nozzle cam (H264 socket → ffmpeg)
-- `:8081/?action=snapshot` — nozzle cam single frame
-- `:8082/?action=stream` — USB cam (V4L2 → ffmpeg)
-- `:8082/?action=snapshot` — USB cam single frame
+### Trade-offs
+- **Lag**: H264→MJPEG transcode adds ~150–300 ms vs the native WebRTC at 8000.
+  Acceptable for Obico AI monitoring, HA snapshots, and Fluidd dashboard glances.
+  For low-latency viewing, use Creality's port 8000 WebRTC (mobile app).
+- **USB unplug recovery**: when a USB cam is unplugged, `/var/run/h264_uds`
+  is left bound to the now-dead USB `cam_app` (orphaned socket). Both port 8000
+  and 8081 break until `cam_app` for the nozzle is restarted (or the printer
+  rebooted). This is a Creality-stack quirk — not something our bridge can fix.
+- **Native USB MJPEG (1920x1080) not used**: USB cam advertises native MJPEG
+  but we can't open `/dev/video2` while `cam_app` holds the lock. Killing
+  `cam_app` for the USB cam orphans the socket binding too.
+
+### Files
+
+**`mjpeg_server.py`** → `/mnt/UDISK/mjpeg_server.py`
+Single-port MJPEG HTTP bridge. Endpoints:
+- `GET :8081/?action=stream` — multipart MJPEG
+- `GET :8081/?action=snapshot` — single JPEG
 
 Log: `/mnt/UDISK/printer_data/logs/mjpeg_server.log`
 
-**New file: `/etc/init.d/mjpeg_server`**
-procd init script (START=99, after Moonraker). Kills any running `cam_app` instance
-holding `/dev/video2` before starting the MJPEG server. Has `respawn` configured.
+**`mjpeg_server.init`** → `/etc/init.d/mjpeg_server`
+procd init script (`START=99`, respawn enabled). Just launches the MJPEG bridge
+— no `cam_app` manipulation.
 
-Enable/disable:
 ```sh
 /etc/init.d/mjpeg_server enable   # creates /etc/rc.d/S99mjpeg_server symlink
-/etc/init.d/mjpeg_server disable
-/etc/init.d/mjpeg_server start
-/etc/init.d/mjpeg_server stop
+/etc/init.d/mjpeg_server {start,stop,restart}
 ```
 
 **Modified: `/usr/share/moonraker/moonraker.conf`**
-Added two `[webcam]` sections:
-
 ```ini
-[webcam usb_camera]
+[webcam camera]
 location: printer
-service: mjpegstreamer
-target_fps: 15
-stream_url: http://192.168.68.37:8082/?action=stream
-snapshot_url: http://192.168.68.37:8082/?action=snapshot
-flip_horizontal: False
-flip_vertical: False
-rotation: 0
-
-[webcam nozzle_camera]
-location: toolhead
 service: mjpegstreamer
 target_fps: 15
 stream_url: http://192.168.68.37:8081/?action=stream
@@ -89,16 +83,9 @@ rotation: 0
 ```
 
 ### Fluidd dashboard setup (manual, per-browser)
-Cameras registered in Moonraker appear in Settings → Cameras without warning icons.
-To show them on the dashboard: pencil icon → Add → Camera → select each camera.
-
-### Trade-offs
-- Creality's native WebRTC stream on port 8000 continues to work for the nozzle cam
-  (during prints), but the USB cam no longer has its own WebRTC stream.
-- USB cam timelapse (was writing to `/mnt/UDISK/timelapse/main_output.h264` via
-  `cam_app`) is no longer recorded. Nozzle cam timelapse is unaffected.
-- AI monitoring (object detection via `/tmp/shm/main_ai_image`) for the USB cam stops.
-  Nozzle cam AI monitoring is unaffected.
+The webcam appears in Settings → Cameras automatically. To put it on the
+dashboard view: edit (pencil) icon → **Add** → **Camera** → select `camera`.
+Layout is stored in browser localStorage, so each browser/profile needs this once.
 
 ---
 
@@ -206,7 +193,8 @@ is on UDISK. The init script `/etc/init.d/mjpeg_server` is on the overlay.
 | File | Purpose |
 |---|---|
 | `spoolman.py` | Modified upstream Moonraker spoolman component; deployed to `/usr/share/moonraker/components/` |
-| `mjpeg_server.py` | MJPEG streaming server for both cameras; deployed to `/mnt/UDISK/` |
+| `mjpeg_server.py` | MJPEG bridge for the Creality H264 socket; deployed to `/mnt/UDISK/` |
+| `mjpeg_server.init` | procd init script for the MJPEG bridge; deployed to `/etc/init.d/mjpeg_server` |
 | `deploy.sh` | Uploads changed files to the printer and restarts affected services. Accepts the printer IP as the first arg (default `192.168.68.37`) |
 | `printer.cfg` | Reference copy of the live Klipper config from the printer (includes Klipper's autosaved bed mesh + probe data; never deployed back) |
 | `CHANGES.md` | This file |

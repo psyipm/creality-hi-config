@@ -63,6 +63,15 @@ deploy_if_changed \
     "mjpeg_server.py"
 restart_mjpeg="${RESTART}"
 
+deploy_if_changed \
+    "${REPO_DIR}/mjpeg_server.init" \
+    "/etc/init.d/mjpeg_server" \
+    "mjpeg_server.init"
+if [[ "${RESTART}" == "1" ]]; then
+    ssh "${SSH_TARGET}" "chmod +x /etc/init.d/mjpeg_server && /etc/init.d/mjpeg_server enable"
+    restart_mjpeg=1
+fi
+
 if [[ "${restart_moonraker}" == "1" ]]; then
     echo ">> Restarting Moonraker"
     ssh "${SSH_TARGET}" "/etc/init.d/moonraker restart"
