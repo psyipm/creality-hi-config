@@ -98,6 +98,15 @@ if [[ "${RESTART}" == "1" ]]; then
     restart_mjpeg=1
 fi
 
+deploy_if_changed \
+    "${REPO_DIR}/moonraker-obico.init" \
+    "/etc/init.d/moonraker-obico" \
+    "moonraker-obico.init"
+restart_obico="${RESTART}"
+if [[ "${RESTART}" == "1" ]]; then
+    ssh "${SSH_TARGET}" "chmod +x /etc/init.d/moonraker-obico && /etc/init.d/moonraker-obico enable"
+fi
+
 if [[ "${restart_moonraker}" == "1" ]]; then
     echo ">> Restarting Moonraker"
     ssh "${SSH_TARGET}" "/etc/init.d/moonraker restart"
@@ -108,7 +117,17 @@ if [[ "${restart_mjpeg}" == "1" ]]; then
     ssh "${SSH_TARGET}" "/etc/init.d/mjpeg_server restart"
 fi
 
-if [[ "${restart_moonraker}" == "0" && "${restart_mjpeg}" == "0" ]]; then
+if [[ "${restart_obico}" == "1" ]]; then
+    if ssh "${SSH_TARGET}" "test -f /mnt/UDISK/printer_data/config/moonraker-obico.cfg"; then
+        echo ">> Restarting moonraker-obico"
+        ssh "${SSH_TARGET}" "/etc/init.d/moonraker-obico restart"
+    else
+        echo ">> moonraker-obico.cfg not found on printer — skipping start."
+        echo "   Run the one-time bootstrap (see CHANGES.md, section 3) before enabling the service."
+    fi
+fi
+
+if [[ "${restart_moonraker}" == "0" && "${restart_mjpeg}" == "0" && "${restart_obico}" == "0" ]]; then
     echo ">> Nothing to do."
 fi
 

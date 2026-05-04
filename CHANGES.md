@@ -164,29 +164,116 @@ sync_rate: 5
 
 ## 3. Obico
 
-**Status: Not implemented.**
+`moonraker-obico` runs as a long-lived Python process that bridges Klipper/Moonraker
+to a self-hosted Obico server (`http://obico.home`). It pulls printer state from
+Moonraker over WebSocket and uploads webcam snapshots from our MJPEG bridge for AI
+print-failure detection.
 
-Obico requires the `moonraker-obico` plugin. Without `git` or `wget` on the printer,
-installation requires downloading the zip archive via Python `urllib.request` and
-extracting it to `/mnt/UDISK/`. This was not attempted during this session.
+### Why a manual install
+The upstream `install.sh` assumes Debian (`apt-get`, `sudo`, `systemctl`,
+`python3-virtualenv`) — none of which apply to this OpenWrt build. We do the steps
+by hand: download source, install pure-Python deps with `pip --target=`, write the
+config, link, register a procd service.
 
-Reference: https://obico.io/docs/user-guides/klipper-setup/
+### One-time bootstrap
 
-Suggested approach when implementing:
-```python
-import urllib.request, zipfile, os
+All commands run on the printer as root. ~20 MB of pure-Python deps go to
+`/mnt/UDISK` (no C toolchain needed; nothing has native extensions).
 
+```sh
+# 1. Download moonraker-obico source (master = 2.2.0+)
+mkdir -p /mnt/UDISK/moonraker-obico /mnt/UDISK/printer_data/logs
+python3 -c "
+import urllib.request
 urllib.request.urlretrieve(
-    'https://github.com/obico/moonraker-obico/archive/refs/heads/main.zip',
-    '/mnt/UDISK/moonraker-obico.zip'
-)
-with zipfile.ZipFile('/mnt/UDISK/moonraker-obico.zip') as z:
-    z.extractall('/mnt/UDISK/')
-os.rename('/mnt/UDISK/moonraker-obico-main', '/mnt/UDISK/moonraker-obico')
+    'https://github.com/TheSpaghettiDetective/moonraker-obico/archive/refs/heads/master.zip',
+    '/tmp/mo.zip')
+"
+python3 -c "
+import zipfile, shutil, os
+with zipfile.ZipFile('/tmp/mo.zip') as z: z.extractall('/tmp/mo-extract')
+dst = '/mnt/UDISK/moonraker-obico/src'
+shutil.rmtree(dst, ignore_errors=True)
+shutil.move('/tmp/mo-extract/moonraker-obico-master', dst)
+"
+rm -rf /tmp/mo.zip /tmp/mo-extract
+
+# 2. Restore the executable bit on bundled scripts (lost in the zip)
+find /mnt/UDISK/moonraker-obico/src -name "*.sh" -exec chmod +x {} +
+
+# 3. Install Python deps to a target dir (the system has no `ensurepip`, so a
+#    venv would fail — but pip is system-wide, so --target works fine).
+mkdir -p /mnt/UDISK/moonraker-obico/lib
+pip3 install --no-cache-dir \
+    --target=/mnt/UDISK/moonraker-obico/lib \
+    -r /mnt/UDISK/moonraker-obico/src/requirements.txt
+
+# 4. Write the config (server URL, Moonraker host, snapshot URL, log path)
+cat > /mnt/UDISK/printer_data/config/moonraker-obico.cfg <<'EOF'
+[server]
+url = http://obico.home
+
+[moonraker]
+host = 127.0.0.1
+port = 7125
+
+[webcam]
+disable_video_streaming = False
+snapshot_url = http://127.0.0.1:8081/?action=snapshot
+stream_url = http://127.0.0.1:8081/?action=stream
+target_fps = 15
+
+[logging]
+path = /mnt/UDISK/printer_data/logs/moonraker-obico.log
+level = INFO
+
+[tunnel]
+dest_host = 127.0.0.1
+dest_port = 80
+dest_is_ssl = False
+EOF
+
+# 5. Link the printer to the Obico server (interactive; writes auth_token to cfg)
+PYTHONPATH=/mnt/UDISK/moonraker-obico/src:/mnt/UDISK/moonraker-obico/lib \
+    python3 -m moonraker_obico.link \
+    -c /mnt/UDISK/printer_data/config/moonraker-obico.cfg
 ```
 
-Then follow the moonraker-obico install script logic manually (link plugin, configure
-Moonraker, create `[obico]` section pointing to `http://obico.home`).
+The link step prints a 6-digit verification code (e.g. `ntsmq`). On the Obico web UI,
+advance the wizard to **Link Printer** and enter the code in "Switch to manual
+linking". mDNS auto-discovery is unreliable across Docker bridges and home subnets,
+so manual entry is the path that just works.
+
+### Service
+
+Once linked, `deploy.sh` pushes `moonraker-obico.init` and starts the procd service:
+
+```sh
+./deploy.sh
+```
+
+Manual control:
+```sh
+/etc/init.d/moonraker-obico {start,stop,restart,enable,disable}
+```
+
+Log: `/mnt/UDISK/printer_data/logs/moonraker-obico.log`
+
+### Expected non-fatal warnings on this build
+The agent emits warnings that are safe to ignore here:
+
+| Warning | Reason |
+|---|---|
+| `No ffmpeg found, or ffmpeg does NOT support h264_omx/h264_v4l2m2m encoding` | The bundled probe looks for hardware H264 encoders for Janus WebRTC. Our build has neither — we use plain MJPEG snapshots instead, which is fine for failure detection. |
+| `Janus not found or not configured correctly` | Same — Janus is the high-quality WebRTC path. Without it, the agent uploads JPEGs to the server at low FPS, which is what AI failure detection needs anyway. |
+| `OBICO_LINK_STATUS not configured as a macro` | An optional `printer.cfg` macro for showing link status. Not added because `printer.cfg` is auto-modified by Klipper and not tracked here. |
+| `error response from moonraker, ... Method not found` | Old Creality-patched Moonraker doesn't expose every API the agent expects. Non-fatal; state push and snapshot upload still work. |
+| `Can not find nozzle camera. First Layer AI disabled` | Requires a separate camera mounted at the nozzle. Not present on this printer. |
+
+### Updates
+To pull a newer agent: re-run steps 1–3 of the bootstrap (the source is replaced,
+deps are reinstalled, config + auth_token are preserved). Then
+`/etc/init.d/moonraker-obico restart`.
 
 ---
 
@@ -212,6 +299,7 @@ is on UDISK. The init script `/etc/init.d/mjpeg_server` is on the overlay.
 | `spoolman.py` | Modified upstream Moonraker spoolman component; deployed to `/usr/share/moonraker/components/` |
 | `mjpeg_server.py` | MJPEG bridge for the Creality H264 socket; deployed to `/mnt/UDISK/` |
 | `mjpeg_server.init` | procd init script for the MJPEG bridge; deployed to `/etc/init.d/mjpeg_server` |
+| `moonraker-obico.init` | procd init script for the Obico bridge; deployed to `/etc/init.d/moonraker-obico`. The agent source + deps + config are not tracked — see the one-time bootstrap in section 3 |
 | `webcam.py` | Modified Moonraker webcam component with `enabled: True` injected for Fluidd 1.30 compatibility; deployed to `/usr/share/moonraker/components/` |
 | `moonraker.conf` | Full Moonraker config including our `[webcam]` and `[spoolman]` sections; deployed to `/usr/share/moonraker/`. Webcam URLs use `__PRINTER_HOST__` placeholder — substituted by `deploy.sh` at upload |
 | `deploy.sh` | Uploads changed files to the printer and restarts affected services. Accepts the printer IP as the first arg (default `192.168.68.37`); also substitutes `__PRINTER_HOST__` in `moonraker.conf` |
