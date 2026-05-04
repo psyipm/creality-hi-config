@@ -1,8 +1,11 @@
 # Creality Hi — Configuration Changes
 
-Printer: Creality Hi (192.168.68.37)
+Printer: Creality Hi
 OS: Tina/OpenWrt 21.02-SNAPSHOT (armv7l, Allwinner T113-i SoC)
 Stack: Klipper + Moonraker (Creality-patched, older build) + Fluidd 1.30.0
+
+Host- and URL-specific values (printer IP, Spoolman URL, Obico URL) are read
+from `.env` in the repo root (gitignored) — see `.env.example` for the schema.
 
 ---
 
@@ -70,9 +73,10 @@ procd init script (`START=99`, respawn enabled). Just launches the MJPEG bridge
 ```
 
 **`moonraker.conf`** → `/usr/share/moonraker/moonraker.conf`
-The full Moonraker config lives in this repo (`moonraker.conf`). Webcam URLs
-use the placeholder `__PRINTER_HOST__`, which `deploy.sh` substitutes with
-the printer IP at upload time. The relevant section:
+The full Moonraker config lives in this repo (`moonraker.conf`). It uses the
+placeholders `__PRINTER_HOST__` (webcam URLs) and `__SPOOLMAN_URL__`
+(`[spoolman] server`), which `deploy.sh` substitutes from `.env` at upload
+time. The relevant section:
 
 ```ini
 [webcam camera]
@@ -147,16 +151,18 @@ the Spoolman web UI during an actual print.
 Use `deploy.sh` from the repo root — uploads any changed file and restarts the
 affected services:
 ```sh
-./deploy.sh                 # uses default IP 192.168.68.37
-./deploy.sh 10.0.0.42       # custom IP
+cp .env.example .env        # one-time, edit values
+./deploy.sh                 # uses PRINTER_IP from .env
+./deploy.sh 192.168.1.50    # CLI arg overrides PRINTER_IP
 ```
 
 ### Moonraker config
-The `[spoolman]` section is in `moonraker.conf` in this repo:
+The `[spoolman]` section is in `moonraker.conf` in this repo (`__SPOOLMAN_URL__`
+is substituted from `.env`):
 
 ```ini
 [spoolman]
-server: http://spoolman.home
+server: __SPOOLMAN_URL__
 sync_rate: 5
 ```
 
@@ -165,7 +171,7 @@ sync_rate: 5
 ## 3. Obico
 
 `moonraker-obico` runs as a long-lived Python process that bridges Klipper/Moonraker
-to a self-hosted Obico server (`http://obico.home`). It pulls printer state from
+to a self-hosted Obico server (`$OBICO_URL` from `.env`). It pulls printer state from
 Moonraker over WebSocket and uploads webcam snapshots from our MJPEG bridge for AI
 print-failure detection.
 
@@ -208,10 +214,12 @@ pip3 install --no-cache-dir \
     --target=/mnt/UDISK/moonraker-obico/lib \
     -r /mnt/UDISK/moonraker-obico/src/requirements.txt
 
-# 4. Write the config (server URL, Moonraker host, snapshot URL, log path)
+# 4. Write the config (server URL, Moonraker host, snapshot URL, log path).
+#    Replace ${OBICO_URL} below with your actual server URL — heredoc is
+#    intentionally quoted so $vars don't expand.
 cat > /mnt/UDISK/printer_data/config/moonraker-obico.cfg <<'EOF'
 [server]
-url = http://obico.home
+url = ${OBICO_URL}
 
 [moonraker]
 host = 127.0.0.1
@@ -301,8 +309,9 @@ is on UDISK. The init script `/etc/init.d/mjpeg_server` is on the overlay.
 | `mjpeg_server.init` | procd init script for the MJPEG bridge; deployed to `/etc/init.d/mjpeg_server` |
 | `moonraker-obico.init` | procd init script for the Obico bridge; deployed to `/etc/init.d/moonraker-obico`. The agent source + deps + config are not tracked — see the one-time bootstrap in section 3 |
 | `webcam.py` | Modified Moonraker webcam component with `enabled: True` injected for Fluidd 1.30 compatibility; deployed to `/usr/share/moonraker/components/` |
-| `moonraker.conf` | Full Moonraker config including our `[webcam]` and `[spoolman]` sections; deployed to `/usr/share/moonraker/`. Webcam URLs use `__PRINTER_HOST__` placeholder — substituted by `deploy.sh` at upload |
-| `deploy.sh` | Uploads changed files to the printer and restarts affected services. Accepts the printer IP as the first arg (default `192.168.68.37`); also substitutes `__PRINTER_HOST__` in `moonraker.conf` |
+| `moonraker.conf` | Full Moonraker config including our `[webcam]` and `[spoolman]` sections; deployed to `/usr/share/moonraker/`. Uses `__PRINTER_HOST__` and `__SPOOLMAN_URL__` placeholders — substituted by `deploy.sh` at upload |
+| `deploy.sh` | Uploads changed files to the printer and restarts affected services. Reads `PRINTER_IP` and `SPOOLMAN_URL` from `.env`; accepts the printer IP as the first arg to override |
+| `.env.example` | Template for `.env` — copy and fill in your printer IP, Spoolman URL, and Obico URL |
 | `CHANGES.md` | This file |
 
 The repo only tracks files we own and deploy. `printer.cfg` is intentionally
@@ -311,5 +320,5 @@ PID values, etc.) — the printer is the source of truth there. To inspect or
 back up the current config:
 
 ```sh
-scp root@192.168.68.37:/mnt/UDISK/printer_data/config/printer.cfg .
+scp "root@${PRINTER_IP}:/mnt/UDISK/printer_data/config/printer.cfg" .
 ```

@@ -4,16 +4,39 @@
 # Usage:
 #   ./deploy.sh [printer_ip]
 #
-# Default printer IP: 192.168.68.37
+# Configuration:
+#   Reads PRINTER_IP and SPOOLMAN_URL from .env in the repo root (see
+#   .env.example). A CLI arg overrides PRINTER_IP.
 #
 # Uploads only files whose content differs from the printer's copy, then
 # restarts the affected services. Requires SSH key auth as root.
 
 set -euo pipefail
 
-PRINTER_IP="${1:-192.168.68.37}"
-SSH_TARGET="root@${PRINTER_IP}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load .env if present. Variables already in the environment win — set -a is
+# scoped so we only auto-export the .env-defined ones.
+if [[ -f "${REPO_DIR}/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "${REPO_DIR}/.env"
+    set +a
+fi
+
+PRINTER_IP="${1:-${PRINTER_IP:-}}"
+SPOOLMAN_URL="${SPOOLMAN_URL:-}"
+
+if [[ -z "${PRINTER_IP}" ]]; then
+    echo "error: PRINTER_IP not set. Pass as arg or define in .env (see .env.example)." >&2
+    exit 1
+fi
+if [[ -z "${SPOOLMAN_URL}" ]]; then
+    echo "error: SPOOLMAN_URL not set in .env (see .env.example)." >&2
+    exit 1
+fi
+
+SSH_TARGET="root@${PRINTER_IP}"
 
 # Cross-platform MD5 of a local file.
 local_md5() {
@@ -29,13 +52,21 @@ remote_md5() {
     ssh "${SSH_TARGET}" "md5sum '$1' 2>/dev/null | awk '{print \$1}'"
 }
 
-# Render a repo file: substitute __PRINTER_HOST__ with the target IP and write
-# the result to a tmp file. Echoes the tmp file path so callers can chain it.
+# Render a repo file: substitute placeholders and write the result to a tmp
+# file. Echoes the tmp file path so callers can chain it.
+#
+# Substitutions:
+#   __PRINTER_HOST__  → $PRINTER_IP
+#   __SPOOLMAN_URL__  → $SPOOLMAN_URL
+#
+# Uses `|` as the sed delimiter because $SPOOLMAN_URL contains slashes.
 render() {
     local src="$1"
     local tmp
     tmp="$(mktemp)"
-    sed "s/__PRINTER_HOST__/${PRINTER_IP}/g" "${src}" > "${tmp}"
+    sed -e "s|__PRINTER_HOST__|${PRINTER_IP}|g" \
+        -e "s|__SPOOLMAN_URL__|${SPOOLMAN_URL}|g" \
+        "${src}" > "${tmp}"
     echo "${tmp}"
 }
 
@@ -73,8 +104,8 @@ deploy_if_changed \
     "webcam.py"
 [[ "${RESTART}" == "1" ]] && restart_moonraker=1
 
-# moonraker.conf has __PRINTER_HOST__ placeholder for webcam URLs; render
-# with the target IP before comparing/uploading.
+# moonraker.conf has __PRINTER_HOST__ and __SPOOLMAN_URL__ placeholders;
+# render before comparing/uploading.
 moonraker_conf_rendered="$(render "${REPO_DIR}/moonraker.conf")"
 deploy_if_changed \
     "${moonraker_conf_rendered}" \
