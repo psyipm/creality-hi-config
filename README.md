@@ -1,4 +1,4 @@
-# creality-hi-config
+# Creality Hi — Configuration Changes
 
 Customizations for the **Creality Hi** 3D printer running its stock firmware
 (Tina/OpenWrt + Klipper + Creality-patched Moonraker + Fluidd 1.30).
