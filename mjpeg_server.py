@@ -2,17 +2,16 @@
 """
 MJPEG bridge for Creality Hi cameras.
 
-Reads H264 from the cam_app Unix socket and re-emits MJPEG over HTTP for
-clients that don't speak Creality's custom WebRTC (Fluidd, Obico, Home
-Assistant). Whichever camera cam_app currently has bound to /var/run/h264_uds
-is what gets served — typically the USB cam when one is plugged in,
-otherwise the built-in nozzle cam.
+A single ffmpeg pipeline keeps decoding H264 from cam_app's Unix socket
+into MJPEG frames; HTTP requests pull from the latest cached frame, so
+snapshots return instantly and streams start with the next frame.
 
 Endpoints:
   GET /?action=stream    multipart MJPEG stream
-  GET /?action=snapshot  single JPEG
+  GET /?action=snapshot  single JPEG (latest cached frame)
 
-The native WebRTC stream on port 8000 keeps working independently.
+The native WebRTC stream on port 8000 is independent; this bridge only
+exists for clients that need MJPEG (Fluidd, Obico, Home Assistant).
 """
 
 import logging
@@ -21,13 +20,15 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-H264_SOCKET   = '/var/run/h264_uds'
-PORT          = 8081
-FFMPEG_FPS    = '15'
+H264_SOCKET    = '/var/run/h264_uds'
+PORT           = 8081
+FFMPEG_FPS     = '15'
 FFMPEG_QUALITY = '5'   # 1=best, 31=worst
-LOG_FILE      = '/mnt/UDISK/printer_data/logs/mjpeg_server.log'
+RECONNECT_DELAY = 2.0  # seconds between reconnect attempts on socket failure
+LOG_FILE       = '/mnt/UDISK/printer_data/logs/mjpeg_server.log'
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,64 +40,123 @@ log = logging.getLogger(__name__)
 JPEG_BOUNDARY = b'--frame'
 
 
-def read_jpeg_frames(proc):
-    """Yield JPEG byte blobs from an ffmpeg image2pipe stdout."""
-    buf = b''
-    while True:
-        chunk = proc.stdout.read(8192)
-        if not chunk:
-            return
-        buf += chunk
-        while True:
-            start = buf.find(b'\xff\xd8')
-            end = buf.find(b'\xff\xd9', start + 2)
-            if start == -1 or end == -1:
-                break
-            yield buf[start:end + 2]
-            buf = buf[end + 2:]
+class FrameProvider:
+    """Persistent decoder: H264 socket -> ffmpeg -> latest JPEG frame.
 
+    Multiple HTTP handlers can read concurrently — readers either grab the
+    latest cached frame (snapshot) or block on the condition variable for
+    the next frame (stream).
+    """
 
-def launch_ffmpeg_h264_to_mjpeg(unix_sock):
-    """Spawn ffmpeg reading H264 from stdin (fed by unix_sock) → MJPEG to stdout."""
-    proc = subprocess.Popen(
-        ['ffmpeg', '-loglevel', 'error',
-         '-f', 'h264', '-i', 'pipe:0',
-         '-vf', f'fps={FFMPEG_FPS}',
-         '-f', 'image2pipe', '-vcodec', 'mjpeg', '-q:v', FFMPEG_QUALITY, 'pipe:1'],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
+    def __init__(self):
+        self._latest = None
+        self._frame_id = 0
+        self._cond = threading.Condition()
+        self._stop = threading.Event()
+        threading.Thread(target=self._run_loop, daemon=True).start()
 
-    def pump():
+    def _open_socket(self):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(H264_SOCKET)
+        return s
+
+    def _spawn_ffmpeg(self):
+        return subprocess.Popen(
+            ['ffmpeg', '-loglevel', 'error',
+             '-f', 'h264', '-i', 'pipe:0',
+             '-vf', f'fps={FFMPEG_FPS}',
+             '-f', 'image2pipe', '-vcodec', 'mjpeg',
+             '-q:v', FFMPEG_QUALITY, 'pipe:1'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _pump_socket_to_ffmpeg(self, sock, proc):
+        """Background thread: copies bytes from cam_app socket to ffmpeg stdin."""
         try:
-            while True:
-                chunk = unix_sock.recv(32768)
+            while not self._stop.is_set():
+                chunk = sock.recv(32768)
                 if not chunk:
                     return
                 proc.stdin.write(chunk)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug('pump ended: %s', exc)
         finally:
             try: proc.stdin.close()
             except Exception: pass
-            try: unix_sock.close()
-            except Exception: pass
 
-    threading.Thread(target=pump, daemon=True).start()
-    return proc
+    def _read_jpeg_frames(self, proc):
+        """Generator: yields complete JPEGs from ffmpeg's image2pipe output."""
+        buf = b''
+        while not self._stop.is_set():
+            chunk = proc.stdout.read(8192)
+            if not chunk:
+                return
+            buf += chunk
+            while True:
+                start = buf.find(b'\xff\xd8')
+                end = buf.find(b'\xff\xd9', start + 2)
+                if start == -1 or end == -1:
+                    break
+                yield buf[start:end + 2]
+                buf = buf[end + 2:]
+
+    def _run_loop(self):
+        """Open socket + ffmpeg, stream frames into the cache; reconnect on failure."""
+        while not self._stop.is_set():
+            sock = proc = None
+            try:
+                sock = self._open_socket()
+                proc = self._spawn_ffmpeg()
+                threading.Thread(
+                    target=self._pump_socket_to_ffmpeg,
+                    args=(sock, proc),
+                    daemon=True,
+                ).start()
+                log.info('decoder pipeline started')
+                for jpg in self._read_jpeg_frames(proc):
+                    with self._cond:
+                        self._latest = jpg
+                        self._frame_id += 1
+                        self._cond.notify_all()
+                log.warning('decoder pipeline ended; reconnecting')
+            except FileNotFoundError:
+                log.warning('%s not present; will retry', H264_SOCKET)
+            except ConnectionRefusedError:
+                log.warning('%s connection refused; will retry', H264_SOCKET)
+            except Exception:
+                log.exception('decoder pipeline crashed')
+            finally:
+                if sock is not None:
+                    try: sock.close()
+                    except Exception: pass
+                if proc is not None:
+                    try: proc.kill()
+                    except Exception: pass
+            time.sleep(RECONNECT_DELAY)
+
+    def latest_frame(self, wait_timeout=5.0):
+        """Return the most recent JPEG, blocking up to wait_timeout for the first frame."""
+        with self._cond:
+            if self._latest is None:
+                self._cond.wait(timeout=wait_timeout)
+            return self._latest
+
+    def stream_frames(self):
+        """Generator: yields a fresh JPEG each time a new frame arrives."""
+        last_id = -1
+        while True:
+            with self._cond:
+                while last_id == self._frame_id:
+                    if not self._cond.wait(timeout=10.0):
+                        return  # timeout — caller decides whether to retry
+                last_id = self._frame_id
+                frame = self._latest
+            yield frame
 
 
-def open_h264_socket():
-    """Connect to cam_app's Unix socket. Returns socket or None on failure."""
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        sock.connect(H264_SOCKET)
-        return sock
-    except Exception as exc:
-        log.warning('cannot connect to %s: %s', H264_SOCKET, exc)
-        sock.close()
-        return None
+provider = FrameProvider()
 
 
 class CameraHandler(BaseHTTPRequestHandler):
@@ -106,59 +166,49 @@ class CameraHandler(BaseHTTPRequestHandler):
         else:
             self._stream()
 
-    def _stream(self):
-        sock = open_h264_socket()
-        if sock is None:
-            self.send_error(503, 'Camera unavailable')
-            return
-        proc = launch_ffmpeg_h264_to_mjpeg(sock)
-        self.send_response(200)
-        self.send_header('Content-Type',
-                         'multipart/x-mixed-replace; boundary=frame')
-        self.end_headers()
-        try:
-            for jpg in read_jpeg_frames(proc):
-                self.wfile.write(JPEG_BOUNDARY +
-                                 b'\r\nContent-Type: image/jpeg\r\n\r\n' +
-                                 jpg + b'\r\n')
-        except Exception:
-            pass
-        finally:
-            proc.kill()
-
     def _snapshot(self):
-        sock = open_h264_socket()
-        if sock is None:
-            self.send_error(503, 'Camera unavailable')
-            return
-        proc = launch_ffmpeg_h264_to_mjpeg(sock)
-        try:
-            jpg = next(read_jpeg_frames(proc), b'')
-        finally:
-            proc.kill()
+        jpg = provider.latest_frame()
         if not jpg:
-            self.send_error(503, 'No frame received')
+            self.send_error(503, 'Camera unavailable')
             return
         self.send_response(200)
         self.send_header('Content-Type', 'image/jpeg')
         self.send_header('Content-Length', str(len(jpg)))
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
         self.end_headers()
         self.wfile.write(jpg)
 
+    def _stream(self):
+        if provider.latest_frame(wait_timeout=2.0) is None:
+            self.send_error(503, 'Camera unavailable')
+            return
+        self.send_response(200)
+        self.send_header('Content-Type',
+                         'multipart/x-mixed-replace; boundary=frame')
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        self.end_headers()
+        try:
+            for jpg in provider.stream_frames():
+                self.wfile.write(JPEG_BOUNDARY +
+                                 b'\r\nContent-Type: image/jpeg\r\n\r\n' +
+                                 jpg + b'\r\n')
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def log_message(self, fmt, *args):
-        pass  # suppress per-request access logs
+        pass  # suppress per-request logs
 
 
 class ThreadingHTTPServer(HTTPServer):
-    """One thread per request so simultaneous stream + snapshot don't block."""
+    """One thread per request so concurrent stream + snapshot don't block."""
     def process_request(self, request, client_address):
         threading.Thread(
-            target=self._process,
+            target=self._handle_one,
             args=(request, client_address),
             daemon=True,
         ).start()
 
-    def _process(self, request, client_address):
+    def _handle_one(self, request, client_address):
         try:
             self.finish_request(request, client_address)
         finally:
